@@ -119,8 +119,6 @@ def send_to_discord(webhook_url, articles):
             time.sleep(0.5) # 抓取文章內容之間稍微間隔
         
         payload = {
-            "username": "PTT Movie Tracker",
-            "avatar_url": "https://i.imgur.com/8nS869a.png", # 電影膠捲圖標
             "embeds": embeds
         }
         
