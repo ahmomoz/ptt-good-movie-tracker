@@ -137,6 +137,8 @@ if __name__ == "__main__":
     if not WEBHOOK_URL:
         print("Error: DISCORD_WEBHOOK_URL not set.")
         articles = get_ptt_articles(pages=3) # 測試抓 3 頁
+        # 反轉順序，讓舊的在前
+        articles.reverse()
         new_articles = filter_and_save(articles)
         print(f"\nFound {len(new_articles)} new articles.")
         for a in new_articles[:2]:
@@ -146,5 +148,7 @@ if __name__ == "__main__":
             print(f"  摘要: {preview}")
     else:
         articles = get_ptt_articles()
+        # 反轉順序，讓舊的在前
+        articles.reverse()
         new_articles = filter_and_save(articles)
         send_to_discord(WEBHOOK_URL, new_articles)
