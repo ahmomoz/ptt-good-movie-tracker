@@ -4,6 +4,36 @@ import time
 import os
 import re
 
+def parse_articles_from_soup(soup, base_url):
+    """從 BeautifulSoup 物件中解析並篩選文章列表"""
+    articles = []
+    for entry in soup.select(".r-ent"):
+        title_tag = entry.select_one(".title a")
+        date_tag = entry.select_one(".date")
+        
+        if not (title_tag and date_tag):
+            continue
+            
+        title = title_tag.text
+        if "好雷" in title or "普雷" in title:
+            articles.append({
+                "title": title,
+                "link": base_url + title_tag["href"],
+                "date": date_tag.text.strip()
+            })
+    return articles
+
+def get_prev_page_url(soup, base_url):
+    """獲取上一頁的完整 URL"""
+    paging_buttons = soup.select(".btn-group-paging a")
+    if len(paging_buttons) < 2:
+        return None
+        
+    prev_link = paging_buttons[1]
+    if prev_link and "href" in prev_link.attrs:
+        return base_url + prev_link["href"]
+    return None
+
 def get_ptt_articles(pages=6):
     base_url = "https://www.ptt.cc"
     url = f"{base_url}/bbs/movie/index.html"
@@ -11,38 +41,17 @@ def get_ptt_articles(pages=6):
     all_articles = []
 
     for _ in range(pages):
+        if not url:
+            break
         try:
             print(f"Fetching list {url}...")
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
+            
             soup = BeautifulSoup(response.text, "html.parser")
+            all_articles.extend(parse_articles_from_soup(soup, base_url))
             
-            # 抓取文章列表
-            for entry in soup.select(".r-ent"):
-                title_tag = entry.select_one(".title a")
-                date_tag = entry.select_one(".date")
-                if title_tag and date_tag:
-                    title = title_tag.text
-                    link = base_url + title_tag["href"]
-                    date = date_tag.text.strip()
-                    # 篩選標題
-                    if "好雷" in title or "普雷" in title:
-                        all_articles.append({
-                            "title": title, 
-                            "link": link, 
-                            "date": date
-                        })
-            
-            # 尋找上一頁連結
-            paging_buttons = soup.select(".btn-group-paging a")
-            if len(paging_buttons) >= 2:
-                prev_link = paging_buttons[1]
-                if prev_link and "href" in prev_link.attrs:
-                    url = base_url + prev_link["href"]
-                else:
-                    break
-            else:
-                break
+            url = get_prev_page_url(soup, base_url)
             time.sleep(0.2)
         except Exception as e:
             print(f"Error fetching {url}: {e}")
