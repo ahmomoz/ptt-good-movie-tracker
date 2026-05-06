@@ -2,7 +2,7 @@ name: Daily PTT Movie Check
 
 on:
   schedule:
-    - cron: '0 2 * * *' # UTC 02:00 = 台灣 10:00
+    - cron: '13 2 * * *' # UTC 02:13 = 台灣 10:13
   workflow_dispatch: # 允許手動觸發測試
 
 jobs:
