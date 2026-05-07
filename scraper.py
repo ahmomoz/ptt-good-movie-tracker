@@ -37,34 +37,46 @@ def get_prev_page_url(soup, base_url):
 def get_ptt_articles(pages=6):
     base_url = "https://www.ptt.cc"
     url = f"{base_url}/bbs/movie/index.html"
-    # 使用更完整的真實瀏覽器 User-Agent
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Cookie": "over18=1"
+        "Cookie": "over18=1",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
     }
     all_articles = []
 
     for _ in range(pages):
         if not url:
             break
-        try:
-            print(f"Fetching list {url}...")
-            response = requests.get(url, headers=headers, timeout=15)
-            # 印出狀態碼輔助除錯
-            if response.status_code != 200:
-                print(f"Warning: Unexpected status code {response.status_code} for {url}")
-            
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, "html.parser")
-            found = parse_articles_from_soup(soup, base_url)
-            print(f"  - Found {len(found)} candidate articles on this page.")
-            all_articles.extend(found)
-            
-            url = get_prev_page_url(soup, base_url)
-            time.sleep(0.5) # 稍微增加延遲
-        except Exception as e:
-            print(f"Error fetching {url}: {e}")
+        
+        # 加入重試機制 (最多重試 3 次)
+        success = False
+        for attempt in range(3):
+            try:
+                print(f"Fetching list {url} (Attempt {attempt + 1})...")
+                response = requests.get(url, headers=headers, timeout=20)
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.text, "html.parser")
+                found = parse_articles_from_soup(soup, base_url)
+                print(f"  - Found {len(found)} candidate articles on this page.")
+                all_articles.extend(found)
+                
+                url = get_prev_page_url(soup, base_url)
+                success = True
+                time.sleep(1) # 增加延遲
+                break 
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                print(f"  - Connection error on attempt {attempt + 1}: {e}")
+                if attempt < 2:
+                    wait_time = (attempt + 1) * 5
+                    print(f"  - Waiting {wait_time}s before retrying...")
+                    time.sleep(wait_time)
+            except Exception as e:
+                print(f"  - Critical error: {e}")
+                break
+        
+        if not success:
+            print(f"Failed to fetch {url} after 3 attempts. Stopping.")
             break
             
     return all_articles
