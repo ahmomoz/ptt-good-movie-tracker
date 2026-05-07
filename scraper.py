@@ -37,7 +37,11 @@ def get_prev_page_url(soup, base_url):
 def get_ptt_articles(pages=6):
     base_url = "https://www.ptt.cc"
     url = f"{base_url}/bbs/movie/index.html"
-    headers = {"User-Agent": "Mozilla/5.0", "Cookie": "over18=1"}
+    # 使用更完整的真實瀏覽器 User-Agent
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Cookie": "over18=1"
+    }
     all_articles = []
 
     for _ in range(pages):
@@ -45,14 +49,20 @@ def get_ptt_articles(pages=6):
             break
         try:
             print(f"Fetching list {url}...")
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=15)
+            # 印出狀態碼輔助除錯
+            if response.status_code != 200:
+                print(f"Warning: Unexpected status code {response.status_code} for {url}")
+            
             response.raise_for_status()
             
             soup = BeautifulSoup(response.text, "html.parser")
-            all_articles.extend(parse_articles_from_soup(soup, base_url))
+            found = parse_articles_from_soup(soup, base_url)
+            print(f"  - Found {len(found)} candidate articles on this page.")
+            all_articles.extend(found)
             
             url = get_prev_page_url(soup, base_url)
-            time.sleep(0.2)
+            time.sleep(0.5) # 稍微增加延遲
         except Exception as e:
             print(f"Error fetching {url}: {e}")
             break
