@@ -15,7 +15,7 @@ def parse_articles_from_soup(soup, base_url):
             continue
             
         title = title_tag.text
-        if "好雷" in title or "普雷" in title:
+        if "好雷" in title or "普雷" in title or "負雷" in title:
             articles.append({
                 "title": title,
                 "link": base_url + title_tag["href"],
@@ -156,14 +156,27 @@ def send_to_discord(webhook_url, articles):
 
 if __name__ == "__main__":
     WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-    if not WEBHOOK_URL:
-        print("Error: DISCORD_WEBHOOK_URL not set.")
+    WEBHOOK_URL_BAD = os.getenv("DISCORD_WEBHOOK_URL_BAD")
+    
+    if not WEBHOOK_URL and not WEBHOOK_URL_BAD:
+        print("Error: Neither DISCORD_WEBHOOK_URL nor DISCORD_WEBHOOK_URL_BAD is set.")
         articles = get_ptt_articles(pages=3) # 測試抓 3 頁
         # 反轉順序，讓舊的在前
         articles.reverse()
         new_articles = filter_and_save(articles)
-        print(f"\nFound {len(new_articles)} new articles.")
-        for a in new_articles[:2]:
+        
+        good_articles = [a for a in new_articles if "好雷" in a["title"] or "普雷" in a["title"]]
+        bad_articles = [a for a in new_articles if "負雷" in a["title"]]
+        
+        print(f"\nFound {len(good_articles)} new good/normal articles:")
+        for a in good_articles[:2]:
+            preview = get_article_preview(a["link"])
+            print(f"\n- 標題: {a['title']}")
+            print(f"  日期: {a['date']}")
+            print(f"  摘要: {preview}")
+            
+        print(f"\nFound {len(bad_articles)} new bad articles:")
+        for a in bad_articles[:2]:
             preview = get_article_preview(a["link"])
             print(f"\n- 標題: {a['title']}")
             print(f"  日期: {a['date']}")
@@ -173,4 +186,24 @@ if __name__ == "__main__":
         # 反轉順序，讓舊的在前
         articles.reverse()
         new_articles = filter_and_save(articles)
-        send_to_discord(WEBHOOK_URL, new_articles)
+        
+        good_articles = [a for a in new_articles if "好雷" in a["title"] or "普雷" in a["title"]]
+        bad_articles = [a for a in new_articles if "負雷" in a["title"]]
+        
+        if WEBHOOK_URL:
+            if good_articles:
+                print(f"Sending {len(good_articles)} good/normal articles to Discord...")
+                send_to_discord(WEBHOOK_URL, good_articles)
+            else:
+                print("No new good/normal articles to send.")
+        else:
+            print("DISCORD_WEBHOOK_URL not set, skipping good/normal articles.")
+            
+        if WEBHOOK_URL_BAD:
+            if bad_articles:
+                print(f"Sending {len(bad_articles)} bad articles to Discord...")
+                send_to_discord(WEBHOOK_URL_BAD, bad_articles)
+            else:
+                print("No new bad articles to send.")
+        else:
+            print("DISCORD_WEBHOOK_URL_BAD not set, skipping bad articles.")

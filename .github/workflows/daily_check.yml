@@ -34,6 +34,7 @@ jobs:
       - name: Run Scraper
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL_BAD: ${{ secrets.DISCORD_WEBHOOK_URL_BAD }}
         run: python scraper.py
 
       - name: Save Cache
