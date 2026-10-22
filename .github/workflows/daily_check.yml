@@ -2,12 +2,24 @@ name: Daily PTT Movie Check
 
 on:
   schedule:
+    # UTC 02:13 = 台灣時間每天 10:13
     - cron: '13 2 * * *'
-  workflow_dispatch: # 允許手動觸發測試
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 避免同一個分支同時執行多次，造成重複通知
+concurrency:
+  group: ptt-movie-check-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,14 +32,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
-      - name: Restore Cache
+      - name: Restore sent articles
         id: cache-sent-articles
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: sent_articles.txt
-          key: sent-articles-${{ github.run_id }}
+          key: sent-articles-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             sent-articles-
 
@@ -35,11 +47,12 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_WEBHOOK_URL_BAD: ${{ secrets.DISCORD_WEBHOOK_URL_BAD }}
-        run: python scraper.py
+        run: python -u scraper.py
 
-      - name: Save Cache
+      # 即使部分發送失敗，也保存已成功發送的文章紀錄
+      - name: Save sent articles
         uses: actions/cache/save@v4
-        if: always()
+        if: ${{ always() && hashFiles('sent_articles.txt') != '' }}
         with:
           path: sent_articles.txt
-          key: sent-articles-${{ github.run_id }}
+          key: sent-articles-${{ github.run_id }}-${{ github.run_attempt }}
