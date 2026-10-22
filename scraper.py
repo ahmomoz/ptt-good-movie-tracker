@@ -1,209 +1,440 @@
-import requests
-from bs4 import BeautifulSoup
-import time
 import os
 import re
+import sys
+import time
+from urllib.parse import urljoin
+
+import requests
+from bs4 import BeautifulSoup
+
+
+BASE_URL = "https://www.ptt.cc"
+SENT_ARTICLES_FILE = "sent_articles.txt"
+MAX_ATTEMPTS = 3
+
+PTT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+}
+
+
+def create_ptt_session():
+    """建立共用的 PTT 連線，保留標頭與 Cookie。"""
+    session = requests.Session()
+    session.headers.update(PTT_HEADERS)
+    session.cookies.set(
+        "over18",
+        "1",
+        domain="www.ptt.cc",
+        path="/",
+    )
+    return session
+
 
 def parse_articles_from_soup(soup, base_url):
-    """從 BeautifulSoup 物件中解析並篩選文章列表"""
+    """解析並篩選好雷、普雷、負雷文章。"""
     articles = []
+
     for entry in soup.select(".r-ent"):
         title_tag = entry.select_one(".title a")
         date_tag = entry.select_one(".date")
-        
+
         if not (title_tag and date_tag):
             continue
-            
-        title = title_tag.text
-        if "好雷" in title or "普雷" in title or "負雷" in title:
+
+        href = title_tag.get("href")
+        if not href:
+            continue
+
+        title = title_tag.get_text(strip=True)
+
+        if any(keyword in title for keyword in ("好雷", "普雷", "負雷")):
             articles.append({
                 "title": title,
-                "link": base_url + title_tag["href"],
-                "date": date_tag.text.strip()
+                "link": urljoin(base_url, href),
+                "date": date_tag.get_text(strip=True),
             })
+
     return articles
 
+
 def get_prev_page_url(soup, base_url):
-    """獲取上一頁的完整 URL"""
-    paging_buttons = soup.select(".btn-group-paging a")
-    if len(paging_buttons) < 2:
-        return None
-        
-    prev_link = paging_buttons[1]
-    if prev_link and "href" in prev_link.attrs:
-        return base_url + prev_link["href"]
+    """取得上一頁 URL。"""
+    for button in soup.select(".btn-group-paging a"):
+        if "上頁" in button.get_text():
+            href = button.get("href")
+            return urljoin(base_url, href) if href else None
+
     return None
 
-def get_ptt_articles(pages=6):
-    base_url = "https://www.ptt.cc"
-    url = f"{base_url}/bbs/movie/index.html"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Cookie": "over18=1",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
-    all_articles = []
 
-    for _ in range(pages):
+def fetch_ptt_list(session, url):
+    """讀取列表，對連線問題、429、5xx 進行有限次重試。"""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        print(
+            f"Fetching list {url} "
+            f"(Attempt {attempt}/{MAX_ATTEMPTS})...",
+            flush=True,
+        )
+
+        try:
+            response = session.get(url, timeout=20)
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ):
+            print("  - PTT connection failed or timed out.", flush=True)
+
+            if attempt == MAX_ATTEMPTS:
+                raise RuntimeError(
+                    f"PTT 連線失敗，已嘗試 {MAX_ATTEMPTS} 次。"
+                ) from None
+
+            wait_time = attempt * 5
+            print(f"  - Waiting {wait_time}s before retrying...", flush=True)
+            time.sleep(wait_time)
+            continue
+
+        print(
+            f"  - HTTP status: {response.status_code}; "
+            f"Content-Type: {response.headers.get('Content-Type', '')}",
+            flush=True,
+        )
+
+        if response.status_code == 403:
+            snippet = re.sub(r"\s+", " ", response.text)[:500]
+            print(f"  - Response preview: {snippet}", flush=True)
+
+            raise RuntimeError(
+                "PTT 回傳 HTTP 403，拒絕存取文章列表。"
+                "本次抓取失敗，不能判定為沒有新文章。"
+            )
+
+        retryable = (
+            response.status_code == 429
+            or 500 <= response.status_code < 600
+        )
+
+        if retryable and attempt < MAX_ATTEMPTS:
+            wait_time = attempt * 10
+            print(
+                f"  - Waiting {wait_time}s before retrying...",
+                flush=True,
+            )
+            time.sleep(wait_time)
+            continue
+
+        if not response.ok:
+            raise RuntimeError(
+                f"PTT 列表讀取失敗，HTTP {response.status_code}。"
+            )
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        if soup.select_one(".r-list-container") is None:
+            raise RuntimeError(
+                "PTT 回應不是預期的文章列表，"
+                "可能是驗證頁或其他回應，停止本次執行。"
+            )
+
+        return soup
+
+    raise RuntimeError("PTT 列表讀取失敗。")
+
+
+def get_ptt_articles(session, pages=6):
+    """抓取指定頁數，任何列表抓取失敗都停止執行。"""
+    url = f"{BASE_URL}/bbs/movie/index.html"
+    all_articles = []
+    seen_links = set()
+
+    for page in range(pages):
         if not url:
             break
-        
-        # 加入重試機制 (最多重試 3 次)
-        success = False
-        for attempt in range(3):
-            try:
-                print(f"Fetching list {url} (Attempt {attempt + 1})...")
-                response = requests.get(url, headers=headers, timeout=20)
-                response.raise_for_status()
-                
-                soup = BeautifulSoup(response.text, "html.parser")
-                found = parse_articles_from_soup(soup, base_url)
-                print(f"  - Found {len(found)} candidate articles on this page.")
-                all_articles.extend(found)
-                
-                url = get_prev_page_url(soup, base_url)
-                success = True
-                time.sleep(1) # 增加延遲
-                break 
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                print(f"  - Connection error on attempt {attempt + 1}: {e}")
-                if attempt < 2:
-                    wait_time = (attempt + 1) * 5
-                    print(f"  - Waiting {wait_time}s before retrying...")
-                    time.sleep(wait_time)
-            except Exception as e:
-                print(f"  - Critical error: {e}")
-                break
-        
-        if not success:
-            print(f"Failed to fetch {url} after 3 attempts. Stopping.")
-            break
-            
+
+        print(f"\nReading page {page + 1}/{pages}", flush=True)
+        soup = fetch_ptt_list(session, url)
+
+        found = parse_articles_from_soup(soup, BASE_URL)
+        print(
+            f"  - Found {len(found)} candidate articles on this page.",
+            flush=True,
+        )
+
+        # 避免置底或跨頁重複文章重複發送
+        for article in found:
+            if article["link"] not in seen_links:
+                seen_links.add(article["link"])
+                all_articles.append(article)
+
+        url = get_prev_page_url(soup, BASE_URL)
+
+        if url and page < pages - 1:
+            time.sleep(1)
+
     return all_articles
 
-def get_article_preview(url):
-    """進入文章頁面抓取前 100 字摘要"""
-    headers = {"User-Agent": "Mozilla/5.0", "Cookie": "over18=1"}
+
+def get_article_preview(session, url):
+    """取得文章前 100 字；摘要失敗時仍允許發送文章連結。"""
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
+        response = session.get(url, timeout=10)
+
+        if not response.ok:
+            print(
+                f"  - Preview unavailable: HTTP {response.status_code}",
+                flush=True,
+            )
+            return "無法讀取預覽內容，請點擊標題查看原文。"
+
         soup = BeautifulSoup(response.text, "html.parser")
-        
-        # 移除文章中的 meta 資訊與簽名檔
         main_content = soup.select_one("#main-content")
-        if not main_content:
-            return ""
-            
-        # 複製一份以免影響原對象，過濾掉 meta 與 push
-        for tag in main_content.select(".article-metaline, .article-metaline-right, .push"):
+
+        if main_content is None:
+            return "無法讀取預覽內容，請點擊標題查看原文。"
+
+        for tag in main_content.select(
+            ".article-metaline, .article-metaline-right, .push"
+        ):
             tag.decompose()
-            
+
         text = main_content.get_text()
-        # 移除空白與特殊字元
-        text = re.sub(r'\s+', ' ', text).strip()
-        # 截取前 100 字
+
+        # 移除常見的 PTT 簽名檔與文章尾端資訊
+        text = re.split(r"\n--\s*\n", text, maxsplit=1)[0]
+        text = text.split("※ 發信站:", 1)[0]
+        text = re.sub(r"\s+", " ", text).strip()
+
+        if not text:
+            return "此文章沒有可顯示的預覽內容。"
+
         return text[:100] + "..." if len(text) > 100 else text
-    except Exception as e:
-        print(f"Error fetching preview for {url}: {e}")
-        return "無法讀取預覽內容"
 
-def filter_and_save(articles, filename="sent_articles.txt"):
+    except requests.exceptions.RequestException:
+        print("  - Preview request failed or timed out.", flush=True)
+        return "無法讀取預覽內容，請點擊標題查看原文。"
+
+
+def filter_new_articles(articles, filename=SENT_ARTICLES_FILE):
+    """排除已成功發送的文章。"""
     if not os.path.exists(filename):
-        with open(filename, "w") as f:
-            f.write("")
-    
-    with open(filename, "r") as f:
-        sent_links = set(f.read().splitlines())
-    
-    new_articles = [a for a in articles if a["link"] not in sent_links]
-    
-    return new_articles
+        return articles
 
-def send_to_discord(webhook_url, articles):
+    with open(filename, "r", encoding="utf-8") as file:
+        sent_links = set(file.read().splitlines())
+
+    return [
+        article
+        for article in articles
+        if article["link"] not in sent_links
+    ]
+
+
+def send_to_discord(
+    webhook_url,
+    articles,
+    session,
+    filename=SENT_ARTICLES_FILE,
+):
+    """分批發送；確認成功後才寫入紀錄。"""
     if not articles:
-        print("No new articles to send.")
+        print("No new articles to send.", flush=True)
         return
 
-    # Discord 限制一次 Embed 數量為 10，我們分批發送
-    for i in range(0, len(articles), 10):
-        batch = articles[i:i+10]
+    for start in range(0, len(articles), 10):
+        batch = articles[start:start + 10]
         embeds = []
-        for a in batch:
-            print(f"Fetching preview for: {a['title']}")
-            preview = get_article_preview(a["link"])
-            
+
+        for article in batch:
+            print(
+                f"Fetching preview for: {article['title']}",
+                flush=True,
+            )
+
+            preview = get_article_preview(session, article["link"])
+
             embeds.append({
-                "title": a["title"],
-                "url": a["link"],
-                "description": f"**日期**: {a['date']}\n\n{preview}",
-                "color": 3447003 # 藍色
+                "title": article["title"][:256],
+                "url": article["link"],
+                "description": (
+                    f"**日期**: {article['date']}\n\n{preview}"
+                ),
+                "color": 3447003,
             })
-            time.sleep(0.5) # 抓取文章內容之間稍微間隔
-        
+
+            time.sleep(0.5)
+
         payload = {
-            "embeds": embeds
+            "embeds": embeds,
+            "allowed_mentions": {"parse": []},
         }
-        
-        response = requests.post(webhook_url, json=payload)
-        if response.status_code == 204:
-            print(f"Successfully sent {len(batch)} articles to Discord.")
-            # 發送成功後才紀錄
-            with open("sent_articles.txt", "a") as f:
-                for a in batch:
-                    f.write(a["link"] + "\n")
-        else:
-            print(f"Failed to send to Discord: {response.status_code}, {response.text}")
+
+        try:
+            response = requests.post(
+                webhook_url,
+                params={"wait": "true"},
+                json=payload,
+                timeout=20,
+            )
+        except requests.exceptions.RequestException:
+            # 不印出例外內容，避免洩漏含 Token 的 Webhook URL
+            raise RuntimeError(
+                "Discord 連線失敗或逾時，"
+                "本批文章未寫入發送紀錄。"
+                "若 Discord 已收到訊息但回應逾時，"
+                "下次執行可能重複發送。"
+            ) from None
+
+        if response.status_code not in (200, 204):
+            if response.status_code == 429:
+                raise RuntimeError(
+                    "Discord 回傳 HTTP 429，觸發發送頻率限制。"
+                    "本批文章未寫入發送紀錄，請稍後再執行。"
+                )
+
+            raise RuntimeError(
+                f"Discord 發送失敗，HTTP {response.status_code}。"
+                "請檢查 Webhook 設定、頻道權限與訊息內容；"
+                "本批文章未寫入發送紀錄。"
+            )
+
+        with open(filename, "a", encoding="utf-8") as file:
+            for article in batch:
+                file.write(article["link"] + "\n")
+
+        print(
+            f"Successfully sent {len(batch)} articles to Discord.",
+            flush=True,
+        )
+
+        if start + 10 < len(articles):
+            time.sleep(2)
+
+
+def main():
+    webhook_good = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+    webhook_bad = os.getenv("DISCORD_WEBHOOK_URL_BAD", "").strip()
+
+    # 在 Actions 中缺少所有 Webhook 時，直接報錯。
+    # 本機未設定 Webhook 時，保留只抓取、不發送的測試模式。
+    dry_run = not webhook_good and not webhook_bad
+
+    if dry_run and os.getenv("GITHUB_ACTIONS") == "true":
+        raise RuntimeError(
+            "未設定 DISCORD_WEBHOOK_URL 或 DISCORD_WEBHOOK_URL_BAD。"
+            "請檢查 GitHub Actions Secrets。"
+        )
+
+    if dry_run:
+        print(
+            "No Discord webhooks configured. Running local preview only.",
+            flush=True,
+        )
+
+    with create_ptt_session() as session:
+        articles = get_ptt_articles(
+            session,
+            pages=3 if dry_run else 6,
+        )
+
+        # 反轉列表，讓較舊的文章先發送
+        articles.reverse()
+        new_articles = filter_new_articles(articles)
+
+        good_articles = [
+            article
+            for article in new_articles
+            if "好雷" in article["title"] or "普雷" in article["title"]
+        ]
+
+        bad_articles = [
+            article
+            for article in new_articles
+            if "負雷" in article["title"]
+        ]
+
+        print(
+            f"\nFetched {len(articles)} unique candidate articles.",
+            flush=True,
+        )
+        print(
+            f"New good/normal: {len(good_articles)}; "
+            f"new bad: {len(bad_articles)}",
+            flush=True,
+        )
+
+        if dry_run:
+            for label, group in (
+                ("好雷／普雷", good_articles),
+                ("負雷", bad_articles),
+            ):
+                print(f"\n{label}：{len(group)} 篇", flush=True)
+
+                for article in group[:2]:
+                    preview = get_article_preview(
+                        session,
+                        article["link"],
+                    )
+                    print(
+                        f"\n標題：{article['title']}\n"
+                        f"日期：{article['date']}\n"
+                        f"連結：{article['link']}\n"
+                        f"摘要：{preview}",
+                        flush=True,
+                    )
+                    time.sleep(0.5)
+
+            return
+
+        # 一個分類發送失敗時，仍嘗試另一個分類
+        failures = []
+
+        for label, webhook, group in (
+            ("good/normal", webhook_good, good_articles),
+            ("bad", webhook_bad, bad_articles),
+        ):
+            if not webhook:
+                print(
+                    f"Webhook for {label} not configured; skipping.",
+                    flush=True,
+                )
+                continue
+
+            if not group:
+                print(
+                    f"No new {label} articles to send.",
+                    flush=True,
+                )
+                continue
+
+            print(
+                f"Sending {len(group)} {label} articles to Discord...",
+                flush=True,
+            )
+
+            try:
+                send_to_discord(webhook, group, session)
+            except RuntimeError as exc:
+                failures.append(f"{label}: {exc}")
+                print(f"ERROR: {label}: {exc}", flush=True)
+
+        if failures:
+            raise RuntimeError("；".join(failures))
+
 
 if __name__ == "__main__":
-    WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-    WEBHOOK_URL_BAD = os.getenv("DISCORD_WEBHOOK_URL_BAD")
-    
-    if not WEBHOOK_URL and not WEBHOOK_URL_BAD:
-        print("Error: Neither DISCORD_WEBHOOK_URL nor DISCORD_WEBHOOK_URL_BAD is set.")
-        articles = get_ptt_articles(pages=3) # 測試抓 3 頁
-        # 反轉順序，讓舊的在前
-        articles.reverse()
-        new_articles = filter_and_save(articles)
-        
-        good_articles = [a for a in new_articles if "好雷" in a["title"] or "普雷" in a["title"]]
-        bad_articles = [a for a in new_articles if "負雷" in a["title"]]
-        
-        print(f"\nFound {len(good_articles)} new good/normal articles:")
-        for a in good_articles[:2]:
-            preview = get_article_preview(a["link"])
-            print(f"\n- 標題: {a['title']}")
-            print(f"  日期: {a['date']}")
-            print(f"  摘要: {preview}")
-            
-        print(f"\nFound {len(bad_articles)} new bad articles:")
-        for a in bad_articles[:2]:
-            preview = get_article_preview(a["link"])
-            print(f"\n- 標題: {a['title']}")
-            print(f"  日期: {a['date']}")
-            print(f"  摘要: {preview}")
-    else:
-        articles = get_ptt_articles()
-        # 反轉順序，讓舊的在前
-        articles.reverse()
-        new_articles = filter_and_save(articles)
-        
-        good_articles = [a for a in new_articles if "好雷" in a["title"] or "普雷" in a["title"]]
-        bad_articles = [a for a in new_articles if "負雷" in a["title"]]
-        
-        if WEBHOOK_URL:
-            if good_articles:
-                print(f"Sending {len(good_articles)} good/normal articles to Discord...")
-                send_to_discord(WEBHOOK_URL, good_articles)
-            else:
-                print("No new good/normal articles to send.")
-        else:
-            print("DISCORD_WEBHOOK_URL not set, skipping good/normal articles.")
-            
-        if WEBHOOK_URL_BAD:
-            if bad_articles:
-                print(f"Sending {len(bad_articles)} bad articles to Discord...")
-                send_to_discord(WEBHOOK_URL_BAD, bad_articles)
-            else:
-                print("No new bad articles to send.")
-        else:
-            print("DISCORD_WEBHOOK_URL_BAD not set, skipping bad articles.")
+    try:
+        main()
+    except Exception as exc:
+        # 不直接輸出未知例外的內容，以免帶出機密網址
+        message = (
+            str(exc)
+            if isinstance(exc, RuntimeError)
+            else f"發生未預期錯誤，類型：{type(exc).__name__}"
+        )
+        print(f"ERROR: {message}", file=sys.stderr, flush=True)
+        sys.exit(1)
