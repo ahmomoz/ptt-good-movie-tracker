@@ -4,7 +4,7 @@ import sys
 import time
 from urllib.parse import urljoin
 
-import requests
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 
 
@@ -13,18 +13,13 @@ SENT_ARTICLES_FILE = "sent_articles.txt"
 MAX_ATTEMPTS = 3
 
 PTT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
     "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
 }
 
 
 def create_ptt_session():
-    """建立共用的 PTT 連線，保留標頭與 Cookie。"""
-    session = requests.Session()
+    """建立共用的 PTT 連線，模擬真實瀏覽器 TLS/JA3 指紋與保留 Cookie。"""
+    session = requests.Session(impersonate="chrome120")
     session.headers.update(PTT_HEADERS)
     session.cookies.set(
         "over18",
