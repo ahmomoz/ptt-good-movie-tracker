@@ -43,6 +43,14 @@ jobs:
           restore-keys: |
             sent-articles-
 
+      - name: Set up Cloudflare WARP
+        uses: fscarmen/warp-on-actions@v1
+        with:
+          stack: dual
+
+      - name: Verify WARP IP
+        run: curl -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "ip|warp|loc"
+
       - name: Run Scraper
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
