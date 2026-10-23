@@ -44,7 +44,7 @@ jobs:
             sent-articles-
 
       - name: Set up Cloudflare WARP
-        uses: fscarmen/warp-on-actions@v1
+        uses: fscarmen/warp-on-actions@v1.4
         with:
           stack: dual
 
